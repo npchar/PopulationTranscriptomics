@@ -10,10 +10,12 @@ option_list = list(
               help="Popoolation2 rc file ", metavar="character"),
   make_option(c("-l", "--list"), action="store_true", default=FALSE,
               help="file provided is a list of file "),
-  make_option(c("-g", "--graphical"), action="store_true", default=FALSE,
+  make_option(c("-r", "--graphical"), action="store_true", default=FALSE,
               help="print fancy dendrogram !"),
+  make_option(c("-a", "--altFST"), action="store_true", default=FALSE,
+              help="Compute FST from Bhatia at al, 2016 instead of Jackson et al, 2014."),
   make_option(c("-i", "--legend"), type="character", default=NULL,
-              help="use tsv file with first col as ordered name of population !"),
+              help="use tsv file with first col as ordered name of population and col2 as sample size !"),
   make_option(c("-o", "--out"), type="character", default=NULL,
               help="output suffix", metavar="character")
   );
@@ -25,6 +27,15 @@ if ( is.null(opt$file) & is.null(opt$out) ){
   print_help(opt_parser)
   stop("Two arguments must be supplied (input and output files names).", call.=FALSE)
 }
+if ( is.null(opt$legend) & opt$graphical==TRUE ){
+  print_help(opt_parser)
+  stop("-i/--legend should be supplied whenn -g/--graphical is activated.", call.=FALSE)
+}
+if ( is.null(opt$legend) & opt$altFST==TRUE ){
+  print_help(opt_parser)
+  stop("-i/--legend should be supplied whenn -a/--altFST is activated.", call.=FALSE)
+}
+
 
 #############################################################################################
 ###	Function to compute FST values by pop across SNP sites (From Popoolation2 rc output)
@@ -51,10 +62,14 @@ compute_PIb = function(Pa,Pb){
 
 # According Weir and Cockerham (1984) and Hudson et al. (1992), FST which is abbreviated as F can be written :
 # this estimator is used for a single allele between two population
-compute_F = function(PIs, PIb){
+compute_Fjackson = function(PIs, PIb){
 	return( (PIb-PIs)/PIb )
 }
-
+# According Bhatia et al. (2014) :
+compute_Fbhatia = function(pa, pb, sizea, sizeb){
+	Fbhatia = ( (pa-pb)^2 - ( pa*(1-pa)/(sizea-1) ) - ( pb*(1-pb)/(sizeb-1) ) ) / ( pa*(1-pb) +pb*(1-pa) ) 
+	return( Fbhatia )
+}
 # In case of multiple allele (for desambiguation multiple locus with bi-allelic state) and according reccomendation of Weir and Cockerham (1984); Bhatia et al. (2013) :
 # We can define to cross-loci FST, the first one Fu defined as the average of the FST and a second (Fw) take into account the cross-loci PIs and PIb to compute a FST statistics. With the words of Chen et al. (2016) in G3 :
 # "we took the average of individual SNP FST values, or we calculated the ratio of the expectations of the denominator and numerator across all SNPs.
@@ -65,12 +80,18 @@ compute_Fu = function(Fvec){
 	return( sum(Fvec)/S )
 }
 #
-compute_Fw = function(PIs, PIb){
+compute_FwJackson = function(PIs, PIb){
 	S = length(PIs)
 	stopifnot(S == length(PIb))
 	return( sum(PIb - PIs) / sum(PIb) )
 }
-
+compute_FwBhatia = function(pa, pb, sizea, sizeb){
+	NumBhatia = (pa-pb)^2 - ( pa*(1-pa)/(sizea-1) ) - ( pb*(1-pb)/(sizeb-1) ) 
+	deNumBhatia =  pa*(1-pb) +pb*(1-pa) 
+	S = length(NumBhatia)
+	stopifnot(S == length(deNumBhatia))
+	return( sum(NumBhatia) / sum(deNumBhatia) )
+}
 # According the result of Bhatia et al. (2013). The Fu mesures give equal weigth for every SNPs and Fw with higher expected levels of polymorphism
 
 #################################################
@@ -104,7 +125,7 @@ Determination_CommonAlleleFrequency = function(vectorInfosSite){
 
 
 # Extract informations needs fo a pair of population
-PrepareAndCompute_FuFw = function(rcDf, A, B){
+PrepareAndCompute_FuFw = function(rcDf, A, B, sizea, sizeb){
 	npop=NumberOfPop(rcDf)
 # 	A should be an integer from 1 to n (number of population)
 # 	B should be an integer from 1 to n (number of population)
@@ -135,12 +156,21 @@ PrepareAndCompute_FuFw = function(rcDf, A, B){
 	AlleleStateFrequency = paste(MaaA, MaaB, MiaA, MiaB, MaafA, MaafB, MiafA, MiafB)
 	CommonAlleleFrequencyVector = t(as.data.frame(lapply(c(AlleleStateFrequency), Determination_CommonAlleleFrequency), row.names=NULL, col.names=NULL, fix.empty.names=F))
 	CommonAlleleFrequencyReady = na.omit(CommonAlleleFrequencyVector)
-	PiS = compute_PIs(as.numeric(CommonAlleleFrequencyReady[,1]), as.numeric(CommonAlleleFrequencyReady[,2]))
-	PiB = compute_PIb(as.numeric(CommonAlleleFrequencyReady[,1]), as.numeric(CommonAlleleFrequencyReady[,2]))
-	Fvector = compute_F(PiS, PiB)
-	Fu = compute_Fu(na.omit(Fvector)) # Ffector return NaN when both allele are fixed, or identical
-	Fw = compute_Fw(PiS, PiB)
-	return(c(Fu, Fw, length(PiS)))
+	pa = as.numeric(CommonAlleleFrequencyReady[,1])
+	pb = as.numeric(CommonAlleleFrequencyReady[,2])
+	if(opt$altFST){
+		Fvector = compute_Fbhatia(pa, pb, sizea, sizeb)
+		Fw = compute_FwBhatia(pa, pb, sizea, sizeb)
+		Fu = compute_Fu(na.omit(Fvector))
+		return(c(Fu, Fw, mean(length(pa), length(pb))))
+	}else{
+		PiS = compute_PIs(pa, pb)
+		PiB = compute_PIb(pa, pb)
+		Fvector = compute_Fjackson(PiS, PiB)
+		Fu = compute_Fu(na.omit(Fvector)) # Ffector return NaN when both allele are fixed, or identical
+		Fw = compute_FwJackson(PiS, PiB)
+		return(c(Fu, Fw, length(PiS)))
+	}
 # given a df with MajorA MinorA MajorB MinorB CountMajA/CountA
 }
 
@@ -150,6 +180,10 @@ main = function(fileIN){
 	Infos = matrix(nrow=Npop, ncol=Npop)
 	FuI = matrix(nrow=Npop, ncol=Npop)
 	FwI = matrix(nrow=Npop, ncol=Npop)
+	if(opt$altFST){
+		legendSize = read.csv(sep="\t", h=F, file=opt$legend)
+		Size = as.numeric(legendSize$V2)
+	}
 	for(i in seq(1, Npop)){
 		for(j in seq(1, Npop)){
 			cat("Working on", fileIN, "pair of pop:",i,"-",j,"\n" )
@@ -159,7 +193,12 @@ main = function(fileIN){
 			}else if(is.na(FuI[i,j])==FALSE){ # to prevent computation of miror Fst (pair[i,j] == pair[j,i])
 				next
 			}else{
-				result = PrepareAndCompute_FuFw(data, i, j)
+				if(opt$altFST){
+					result = PrepareAndCompute_FuFw(data, i, j, Size[i], Size[j])
+				}else{
+					result = PrepareAndCompute_FuFw(data, i, j, 0, 0)
+				}
+				
 				FuIpop = result[1]
 				FwIpop = result[2]
 				Nsites = result[3]
@@ -193,8 +232,8 @@ main = function(fileIN){
 		
 		pdf(file=paste(fileIN, opt$out, "_fst.pdf",sep=""))
 		par(mfrow=c(1,2))
-		plot(hclust(as.dist(fu_r[,1:length(fu_r[,1])]), method="average"), xlab='UPGMA clustering of the 12 pops using Fst_u')
-		plot(hclust(as.dist(fw_r[,1:length(fw_r[,1])]), method="average"), xlab='UPGMA clustering of the 12 pops using Fst_w')
+		plot(hclust(as.dist(fu_r[,1:length(fu_r[,1])]), method="average"), xlab='Fst_u: UPGMA clustering')
+		plot(hclust(as.dist(fw_r[,1:length(fw_r[,1])]), method="average"), xlab='Fst_w: UPGMA clustering')
 		dev.off()
 	}
 	
